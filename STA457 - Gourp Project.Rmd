@@ -1,0 +1,442 @@
+---
+title: "STA457 - Gorup Project"
+authors: "Wendy Weng, "
+output:
+  pdf_document:
+    number_sections: true
+    toc: true
+    toc_depth: 2
+    fig_caption: true
+    latex_engine: xelatex
+fontsize: 12pt
+geometry: margin=1in
+---
+# Introduction
+
+# Literature Review
+
+# Methodology
+
+## ETS Model
+## ARIMAX Model and SARIMAX Model
+## GARCH Model
+## Regression Model
+
+# Data
+
+#  Forecasting and Results
+
+## Model Training and Validation Process
+## Performance Evaluation of the Forecasting Model
+### ETS Models, ARIMAX Model and SARIMAX Model
+### Garch Model
+## Forecasted Values and Observed Patterns
+## Graphical Representations of Predictions Versus Actual Prices.
+
+# Discussion and Conclusion
+
+# Appendix
+
+# References
+
+```{r, echo=FALSE, include=FALSE}
+library(tidyverse)
+library(lubridate)
+library(forecast)
+library(tseries)
+library(ggplot2)
+library(caret)
+library(slider)
+library(astsa)
+library(fGarch)
+library(dplyr)
+library(knitr)
+```
+# Data Cleaning
+```{r}
+Cocoa_prices <- read_csv("Daily Prices_ICCO.csv",show_col_types = FALSE)
+Ghana_data <- read_csv("Ghana_data.csv",show_col_types = FALSE) 
+```
+## Data Preprocessing
+```{r}
+#Daily Data Cleaning
+Cocoa_prices_clean <- Cocoa_prices %>%
+  mutate(Date = dmy(Date), 
+         ICCO_price = as.numeric(gsub("/", "", `ICCO daily price (US$/tonne)`))) %>%
+  select(Date, Daily_price = ICCO_price) %>%
+  arrange(Date)
+
+Ghana_data_clean <- Ghana_data %>%
+  mutate(DATE = ymd(DATE)) %>%
+  select(Date = DATE, PRCP, TAVG, TMAX, TMIN) %>%
+  group_by(Date) %>%
+  slice_tail(n = 1) %>%
+  ungroup()
+
+cocoa_data <- inner_join(Cocoa_prices_clean, Ghana_data_clean, by = "Date") %>% 
+  mutate(diff_price = c(NA, diff(Daily_price))) %>%
+  drop_na()
+```
+## Monthly Data Preparation
+```{r}
+#Monthly data cleaning
+monthly_data <- cocoa_data %>%
+  mutate(year = year(Date), 
+         month = month(Date)) %>%
+  group_by(year, month) %>%
+  summarize(Monthly_price = mean(Daily_price, na.rm = TRUE),
+    PRCP = mean(PRCP, na.rm = TRUE),
+    TAVG = mean(TAVG, na.rm = TRUE),
+    TMAX = mean(TMAX, na.rm = TRUE),
+    TMIN = mean(TMIN, na.rm = TRUE),
+    .groups = "drop") %>%
+  mutate(diff_price = c(NA, diff(Monthly_price))) %>%
+  drop_na()
+monthly_data$date <- as.Date(paste0(monthly_data$year, "-", monthly_data$month, "-01"))
+```
+## Descriptive Statistics
+
+```{r}
+# Summary for cocoa price data
+cocoa_summary <- cocoa_data %>%
+  select(Daily_price) %>%
+  summarise(
+    Mean = mean(Daily_price, na.rm = TRUE),
+    SD = sd(Daily_price, na.rm = TRUE),
+    Min = min(Daily_price, na.rm = TRUE),
+    Max = max(Daily_price, na.rm = TRUE)
+  )
+kable(cocoa_summary, caption = "Table 1: Summary Statistics for Cocoa Prices (USD)")
+
+# Summary for climate variables
+climate_summary <- cocoa_data %>%
+  select(PRCP, TAVG, TMAX, TMIN) %>%
+  summarise_all(~c(mean(., na.rm = TRUE), sd(., na.rm = TRUE), min(., na.rm = TRUE), max(., na.rm = TRUE))) %>%
+  t() %>%
+  as.data.frame() %>%
+  setNames(c("Mean", "SD", "Min", "Max"))
+kable(climate_summary, caption = "Table 2: Summary Statistics for Ghana Climate Variables")
+```
+## Visualizations
+```{r}
+#plots
+plot1 <- ggplot(monthly_data, aes(x = date)) +
+  geom_line(aes(y = scale(Monthly_price)), color = "darkblue") +
+  labs(title = "Monthly Cocoa Prices", x = "Date", y = "Monthly Price") +
+  scale_x_date(date_breaks = "5 year", date_labels = "%Y") +  
+  theme_minimal() + 
+  theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+        panel.background = element_rect(fill = "white", color = NA),
+        plot.background = element_rect(fill = "white", color = NA),
+        panel.grid.major = element_line(color = "gray90"),
+        panel.grid.minor = element_blank()) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        legend.title = element_blank())
+plot1
+```
+
+```{r}
+plot2 <- ggplot(monthly_data, aes(x = date)) +
+  geom_line(aes(y = scale(diff_price)), color = "darkgreen") +
+  labs(title = "Differened Transfered Cocoa Monthly Prices", x = "Date", y = "Differenced Monthly Price") +
+  scale_x_date(date_breaks = "5 year", date_labels = "%Y") +  
+  theme_minimal() + 
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),  
+    panel.background = element_rect(fill = "white", color = NA),       
+    plot.background = element_rect(fill = "white", color = NA),       
+    panel.grid.major = element_line(color = "gray90"),                 
+    panel.grid.minor = element_blank()
+  )
+plot2
+```
+# Forecasting and Results
+## Model Training and Validation Process
+```{r}
+ts_diff_price <- ts(na.omit(monthly_data$diff_price),
+                    start = c(min(monthly_data$year), min(monthly_data$month)),
+                    frequency = 12)
+decomp <- stl(ts_diff_price, s.window = "periodic")
+plot(decomp, main = "STL Decomposition of Differenced Cocoa Price")
+```
+
+```{r}
+#Training data & Testing data
+n_monthly <- nrow(monthly_data)
+test_size <- n_monthly - 3 #Last 4 months
+train_data <- monthly_data[2 : test_size - 1, ]
+test_data  <- monthly_data[test_size : n_monthly, ]
+external_regressors_train <- train_data %>% 
+  select(PRCP, TAVG, TMAX, TMIN) %>% 
+  as.matrix()
+external_regressors_test  <- test_data  %>% 
+  select(PRCP, TAVG, TMAX, TMIN) %>% 
+  as.matrix()
+```
+## Performance Evaluation of the Forecasting Model
+## ACF and PACF Plots
+```{r}
+par(mfrow = c(1, 2), oma = c(0, 0, 3, 0))  
+#Monthly Prices: ACF plot & PACF plot
+acf(train_data$Monthly_price, main = "ACF", col = "darkblue", lwd = 2, cex.main = 1.2)
+pacf(train_data$Monthly_price, main = "PACF", col = "darkblue", lwd = 2, cex.main = 1.2)
+mtext("ACF and PACF of Monthly Cocoa Prices", outer = TRUE, cex = 1.3, font = 2)
+
+
+par(mfrow = c(1, 2), oma = c(0, 0, 3, 0))  
+#Differenced Prices: ACF plot & PACF plot
+acf(train_data$diff_price, main = "ACF", col = "darkgreen", lwd = 2, cex.main = 1.2)
+pacf(train_data$diff_price, main = "PACF", col = "darkgreen", lwd = 2, cex.main = 1.2)
+mtext("ACF and PACF of Differenced Cocoa Prices", outer = TRUE, cex = 1.3, font = 2)
+```
+## Model Implementation
+### ETS Model
+```{r}
+#ETS Model
+ets_model <- ets(train_data$diff_price)
+plot(ets_model)
+summary(ets_model)
+```
+
+### ARIMAX Model and SARIMAX Model
+
+```{r}
+# ARIMAX Model
+arimax_model <- auto.arima(train_data$Monthly_price, 
+                           xreg = external_regressors_train,
+                           seasonal = FALSE)
+# SARIMAX Model
+sarimax_model <- auto.arima(train_data$Monthly_price, 
+                            xreg = external_regressors_train,
+                            seasonal = TRUE)
+arimax_model
+sarimax_model
+```
+
+### GARCH Model
+
+```{r}
+#ARIMA + GARCH Model
+arima_model <- arima(train_data$diff_price, order=c(0,1,2))
+checkresiduals(arima_model)
+summary(arima_model) #ARIMA
+garch_model <- garchFit(~ arma(0,2) + garch(1,1), data = train_data$diff_price, trace = FALSE)
+summary(garch_model)
+```
+
+
+
+```{r}
+#GARCH forecast
+n_forecast <- nrow(test_data)  
+last_price <- as.numeric(tail(train_data$Monthly_price,1))
+garch_forecast <- predict(garch_model, n.ahead = n_forecast)
+garch_diff_forecast <- garch_forecast$meanForecast
+price_forecast <- cumsum(garch_diff_forecast) + as.numeric(last_price)
+forecast_result <- data.frame(Time = test_data$date[1 : n_forecast],
+                              Actual = test_data$Monthly_price[1 : n_forecast],
+                              GARCH_Predicted = price_forecast)
+garchplot <- plot(forecast_result$Time, forecast_result$Actual, 
+                  type = "l", col = "black", lwd = 2,
+                  ylim = range(c(forecast_result$Actual, forecast_result$GARCH_Predicted),
+                               na.rm = TRUE),
+                  ylab = "Monthly Price", xlab = "Time (Months)", 
+                  main = "GARCH Forecast vs Actual") 
+lines(forecast_result$Time, forecast_result$GARCH_Predicted, col = "blue", lwd = 2)
+legend("topleft", legend = c("Actual", "GARCH Forecast"),
+       col = c("black", "blue"), lty = 1, lwd = 2)
+```
+
+### Regression Model
+```{r}
+#Regression Model
+regression_model <- lm(formula = Monthly_price ~ time(Monthly_price) + 
+                         ts(PRCP) + ts(TAVG) + ts(TMAX) + ts(TMIN), data = train_data)
+train_ts <- ts(train_data$Monthly_price)
+test_xreg_2 <- test_data %>%
+  select(PRCP, TAVG, TMAX, TMIN) %>%
+  drop_na() %>%
+  as.matrix()
+train_xreg_2 <- train_data %>%
+  select(PRCP, TAVG, TMAX, TMIN) %>%
+  drop_na() %>%
+  as.matrix()
+train_data <- train_data %>% drop_na()
+test_data <- test_data %>% drop_na()
+summary(regression_model)
+plot(regression_model)
+```
+
+```{r}
+#forecast
+forecast_est <- forecast(ets_model, h = nrow(test_data))
+forecast_arimax <- forecast(arimax_model, xreg = external_regressors_test)
+forecast_sarimax <- forecast(sarimax_model, xreg = external_regressors_test)
+forecast_regression <- predict(regression_model, data = test_data)
+```
+## Model Accuracy Comparison
+```{r}
+ets_acc <- accuracy(forecast_est$mean, test_data$diff_price)
+arimax_acc <- accuracy(forecast_arimax$mean, test_data$diff_price)
+sarimax_acc <- accuracy(forecast_sarimax$mean, test_data$diff_price)
+garch_acc <- accuracy(garch_diff_forecast,
+                      test_data$diff_price[1:length(garch_diff_forecast)])
+regess_acc <- accuracy(forecast_regression, test_data$Monthly_price)
+```
+
+```{r}
+combined_forecast_df <- data.frame(Date = test_data$date,
+                                   Cocoa_Price = test_data$Monthly_price,
+                                   ETS = forecast_est$mean[1:nrow(test_data)],
+                                   ARIMAX = forecast_arimax$mean[1:nrow(test_data)],
+                                   SARIMAX = forecast_sarimax$mean[1:nrow(test_data)],
+                                   GARCH = price_forecast[1:nrow(test_data)],
+                                   Regression = forecast_regression[1:nrow(test_data)])
+
+long_df <- pivot_longer(combined_forecast_df,
+                        cols = c("Cocoa_Price", "ETS", "ARIMAX", 
+                                 "SARIMAX", "GARCH", "Regression"),
+                        names_to = "Model",
+                        values_to = "Value")
+```
+
+```{r}
+ets_acc_df <- as.data.frame(ets_acc)
+arimax_acc_df <- as.data.frame(arimax_acc)
+sarimax_acc_df <- as.data.frame(sarimax_acc)
+garch_acc_df <- as.data.frame(garch_acc)
+regress_acc_df <- as.data.frame(regess_acc)
+
+ets_acc_df$model <- "ETS"
+arimax_acc_df$model <- "ARIMAX"
+sarimax_acc_df$model <- "SARIMAX"
+garch_acc_df$model <- "GARCH"
+regress_acc_df$model <- "Regression"
+
+all_models_acc <- bind_rows(ets_acc_df, arimax_acc_df, sarimax_acc_df, garch_acc_df, regress_acc_df)
+comparison_table <- all_models_acc %>% select(model, RMSE, MAE, MAPE)
+kable(comparison_table, caption = "Table: Model Accuracy Comparison")
+
+best_model <- comparison_table %>%
+  filter(RMSE == min(RMSE)) %>%
+  pull(model)
+```
+## Forecasted Values and Observed Patterns
+```{r}
+#Models' Final Prediction PLot
+ggplot(long_df, aes(x = Date, y = Value, color = Model, linetype = Model)) +
+  geom_line(size = 0.6) +
+  labs(title = "Forecast Comparison: All Models vs Actual Cocoa Prices",
+       x = "Date", y = "Cocoa Price (USD/tonne)") +
+  theme_minimal() +
+  scale_color_manual(values = c("Cocoa_Price" = "black", "ETS" = "blue",
+                                "ARIMAX" = "orange", "SARIMAX" = "red",
+                                "GARCH" = "green", "Regression" = "purple")) +
+  scale_linetype_manual(values = c("Cocoa_Price" = "solid", "ETS" = "solid",
+                                   "ARIMAX" = "solid", "SARIMAX" = "solid",
+                                   "GARCH" = "solid", "Regression" = "solid")) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        legend.title = element_blank())
+```
+## Graphical Representations of Predictions Versus Actual Prices.
+```{r}
+# fitted model output of ETS Model
+ets_fitted <- fitted(ets_model)
+
+compare_ets_df <- data.frame(Time = time(ets_fitted),
+                             Actual = train_data$diff_price,
+                             ETS = as.numeric(ets_fitted))
+
+long_est_df <- compare_ets_df %>%
+  pivot_longer(cols = c("Actual", "ETS"),
+               names_to = "Model",
+               values_to = "Value")
+
+ets_model_colors <- c("Actual" = "black", "ETS" = "green")
+
+ggplot(long_est_df, aes(x = Time, y = Value, color = Model)) +
+  geom_line(size = 0.4) +
+  scale_color_manual(values = ets_model_colors) +
+  labs(title = "Forecast Comparison: ARIMAX & SARIMAX vs Actual",
+       x = "Date", y = "Cocoa Daily Price (USD/tonne)") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+        legend.position = "right",
+        legend.title = element_blank(),
+        legend.text = element_text(size = 10))
+```
+
+```{r}
+#fitted model output of ARIMA & SARIMA Model
+arimax_fitted <- fitted(arimax_model)
+sarimax_fitted <- fitted(sarimax_model)
+
+compare_armia_df <- data.frame(Time = train_data$date,  
+                               Actual = train_data$Monthly_price,
+                               ARIMAX = as.numeric(arimax_fitted),
+                               SARIMAX = as.numeric(sarimax_fitted))
+
+long_armia_df <- compare_armia_df %>%
+  pivot_longer(cols = c("Actual", "ARIMAX", "SARIMAX"),
+               names_to = "Model",
+               values_to = "Value")
+
+arimax_model_colors <- c("Actual" = "black",
+                         "ARIMAX" = "blue",
+                         "SARIMAX" = "salmon")
+
+ggplot(long_armia_df, aes(x = Time, y = Value, color = Model)) +
+  geom_line(size = 0.5) +
+  scale_color_manual(values = arimax_model_colors) +
+  labs(title = "Forecast Comparison: ARIMAX & SARIMAX vs Actual",
+       x = "Date", y = "Cocoa Daily Price (USD/tonne)") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+        legend.position = "right",
+        legend.title = element_blank(),
+        legend.text = element_text(size = 10))
+```
+
+```{r}
+# fitted model output of GARCH Model
+garch_fitted <- fitted(garch_model)
+
+compare_garch_df <- data.frame(Time = train_data$date,
+                               Actual = train_data$diff_price,
+                               GARCH = as.numeric(garch_fitted))
+
+long_garch_df <- compare_garch_df %>%
+  pivot_longer(cols = c("Actual", "GARCH"), 
+               names_to = "Model",
+               values_to = "Value")
+
+garch_colors <- c("Actual" = "black", "GARCH" = "blue")
+
+ggplot(long_garch_df, aes(x = Time, y = Value, color = Model)) +
+  geom_line(size = 0.4) +
+  scale_color_manual(values = garch_colors) +
+  labs(title = "Actual vs Fitted Values from GARCH Model",
+       x = "Time", y = "Differenced Cocoa Price") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        legend.position = "right",
+        legend.title = element_blank(),
+        legend.text = element_text(size = 10))
+```
+```{r}
+# fitted model output of Regression Model
+regression_fitted <- fitted(regression_model)
+compare_regression_df <- data.frame(
+  Time = train_data$date,
+  Actual = train_data$Monthly_price,
+  Regression = as.numeric(regression_fitted))
+
+ggplot(compare_regression_df, aes(x = Time)) +
+  geom_line(aes(y = Actual), color = "black", linetype = "solid") +
+  geom_line(aes(y = Regression), color = "purple") +
+  labs(title = "Actual vs Fitted Values from Regression Model",
+       x = "Time", y = "Monthly Cocoa Price") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        legend.title = element_blank())
+```
