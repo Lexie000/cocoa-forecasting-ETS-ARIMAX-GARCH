@@ -1,0 +1,207 @@
+---
+title: "STA457 - Gorup Project"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+```{r, echo=FALSE}
+library(tidyverse)
+library(lubridate)
+library(forecast)
+library(tseries)
+library(ggplot2)
+library(xgboost)
+library(caret)
+library(slider)
+```
+
+```{r}
+Cocoa_prices <- read_csv("Daily Prices_ICCO.csv",show_col_types = FALSE)
+Ghana_data <- read_csv("Ghana_data.csv",show_col_types = FALSE) 
+```
+
+```{r}
+#Data Cleaning
+Cocoa_prices_clean <- Cocoa_prices %>%
+  mutate(Date = dmy(Date), 
+         ICCO_price = as.numeric(gsub("/", "", `ICCO daily price (US$/tonne)`))) %>%
+  select(Date, Daily_price = ICCO_price) %>%
+  arrange(Date)
+
+Ghana_data_clean <- Ghana_data %>%
+  mutate(DATE = ymd(DATE)) %>%
+  select(Date = DATE, PRCP, TAVG, TMAX, TMIN) 
+
+cocoa_data <- inner_join(Cocoa_prices_clean, Ghana_data_clean, by = "Date") %>%
+  mutate(log_price = log(Daily_price),
+         diff_log_price = c(NA, diff(log_price))) %>%
+  drop_na()
+cocoa_data
+```
+
+```{r}
+#plots
+plot1 <- ggplot(cocoa_data, aes(x = Date)) +
+  geom_line(aes(y = scale(Daily_price)), color = "darkblue") +
+  labs(title = "Daily Cocoa Prices", x = "Date", y = "Daily Price") +
+  scale_x_date(date_breaks = "5 year", date_labels = "%Y") +  
+  theme_minimal() + 
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),  
+    panel.background = element_rect(fill = "white", color = NA),       
+    plot.background = element_rect(fill = "white", color = NA),       
+    panel.grid.major = element_line(color = "gray90"),                 
+    panel.grid.minor = element_blank()
+  )
+plot1
+```
+
+```{r}
+plot2 <- ggplot(cocoa_data, aes(x = Date)) +
+  geom_line(aes(y = scale(log_price)), color = "darkgreen") +
+  labs(title = "Log Transfered Cocoa Daily Prices", x = "Date", y = "Log (Daily Price)") +
+  scale_x_date(date_breaks = "5 year", date_labels = "%Y") +  
+  theme_minimal() + 
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),  
+    panel.background = element_rect(fill = "white", color = NA),       
+    plot.background = element_rect(fill = "white", color = NA),       
+    panel.grid.major = element_line(color = "gray90"),                 
+    panel.grid.minor = element_blank()
+  )
+plot2
+```
+
+```{r}
+plot3 <- ggplot(cocoa_data, aes(x = Date)) +
+  geom_line(aes(y = scale(diff_log_price)), color = "darkred") +
+  labs(title = "Differenced Log Transfered Cocoa Daily Prices", x = "Date", y = "Differenced Log (Daily Price)") +
+  scale_x_date(date_breaks = "5 year", date_labels = "%Y") +  
+  theme_minimal() + 
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),  
+    panel.background = element_rect(fill = "white", color = NA),       
+    plot.background = element_rect(fill = "white", color = NA),       
+    panel.grid.major = element_line(color = "gray90"),                 
+    panel.grid.minor = element_blank()
+  )
+plot3
+```
+
+```{r}
+ts_log_price <- ts(cocoa_data$log_price, frequency = 365, start = c(year(min(cocoa_data$Date)), yday(min(cocoa_data$Date))))
+decomp <- stl(ts_log_price, s.window = "periodic")
+plot(decomp, main = "STL Decomposition of Log Cocoa Price")
+```
+
+```{r}
+#Training data & Testing data
+train_size <- floor(0.8 * nrow(cocoa_data))
+train_data <- cocoa_data[1:train_size, ]
+test_data <- cocoa_data[(train_size + 1):nrow(cocoa_data), ]
+```
+
+```{r}
+#ETS Model
+ets_model_1 <- ets(train_data$diff_log_price)
+ets_model_2 <- ets(train_data$diff_log_price, model = "ZZZ")
+ets_model_1
+ets_model_2
+```
+
+```{r}
+external_regressors_train <- train_data %>% select(PRCP, TAVG, TMAX, TMIN) %>% as.matrix()
+external_regressors_test  <- test_data  %>% select(PRCP, TAVG, TMAX, TMIN) %>% as.matrix()
+
+# ARIMAX
+arimax_model <- auto.arima(train_data$diff_log_price, 
+                           xreg = external_regressors_train,
+                           seasonal = FALSE)
+
+# SARIMAX
+sarimax_model <- auto.arima(train_data$diff_log_price, 
+                            xreg = external_regressors_train,
+                            seasonal = TRUE)
+arimax_model
+sarimax_model
+```
+
+```{r}
+#forecast
+ets_forecast_1 <- forecast(ets_model_1, h = nrow(test_data))
+ets_forecast_2 <- forecast(ets_model_2, h = nrow(test_data))
+forecast_arimax <- forecast(arimax_model, xreg = external_regressors_test)
+forecast_sarimax <- forecast(sarimax_model, xreg = external_regressors_test)
+
+ets_acc1 <- accuracy(ets_forecast_1, test_data$diff_log_price)
+ets_acc2 <- accuracy(ets_forecast_2, test_data$diff_log_price)
+arimax_acc <- accuracy(forecast_arimax, test_data$diff_log_price)
+sarimax_acc <- accuracy(forecast_sarimax, test_data$diff_log_price)
+```
+
+
+```{r}
+print("EST Model 1 Performance:")
+ets_acc1
+
+print("EST Model 2 Performance:")
+ets_acc2
+
+print("ARIMAX Model Performance:")
+arimax_acc
+
+print("SARIMAX Model Performance:")
+sarimax_acc
+```
+
+
+```{r}
+models <- list("ETS Model 1" = ets_acc1,
+               "ETS Model 2" = ets_acc2,
+               "ARIMAX" = arimax_acc,
+               "SARIMAX" = sarimax_acc)
+best_model_name <- names(which.min(sapply(models, function(x) x[2])))
+```
+
+Best Model Based on RMSE:**`best_model_name`**
+
+```{r}
+re_log_prices <- function(last_log_price, diffs) {cumsum(c(last_log_price, diffs))[-1]}
+
+last_log_price <- tail(train_data$log_price, 1)
+n <- nrow(test_data)
+forecast_dates <- test_data$Date
+
+# Reconstruct log forecasts
+ets1_log_forecast    <- re_log_prices(last_log_price, ets_forecast_1$mean)
+ets2_log_forecast    <- re_log_prices(last_log_price, ets_forecast_2$mean)
+arimax_log_forecast  <- re_log_prices(last_log_price, forecast_arimax$mean)
+sarimax_log_forecast <- re_log_prices(last_log_price, forecast_sarimax$mean)
+
+# Exponentiate to get actual price forecasts
+ets1_price_forecast    <- exp(ets1_log_forecast)
+ets2_price_forecast    <- exp(ets2_log_forecast)
+arimax_price_forecast  <- exp(arimax_log_forecast)
+sarimax_price_forecast <- exp(sarimax_log_forecast)
+
+# Combine into dataframe
+forecast_df <- tibble(Date = rep(forecast_dates, 4),
+                      Forecast = c(ets1_price_forecast, ets2_price_forecast, 
+                                   arimax_price_forecast, sarimax_price_forecast),
+                      Model = rep(c("ETS Model 1", "ETS Model 2", "ARIMAX", "SARIMAX"), each = n))
+forecast_df
+```
+
+
+```{r}
+plot4 <- ggplot(forecast_df, aes(x = Date, y = Forecast, color = Model)) +
+  geom_line(data = cocoa_data, aes(x = Date, y = Daily_price), color = "black") +
+  geom_line(data = forecast_df, aes(x = Date, y = Forecast, color = Model), linewidth = 1) +
+  labs(title = "Model Forecasts of Cocoa Price",
+       y = "Cocoa Price (USD)", x = "Date") +
+  theme_minimal() +
+  scale_color_manual(values = c("blue","red","green","purple"))
+plot4
+```
+
+
