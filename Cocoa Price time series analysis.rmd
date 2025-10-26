@@ -1,6 +1,6 @@
 ---
 title: "STA457 - Gorup Project"
-authors: "Wendy Weng, "
+authors: "Wendy Weng, Jinmin Li, Tianhuiqi Chen, Catherine Song "
 output:
   pdf_document:
     number_sections: true
